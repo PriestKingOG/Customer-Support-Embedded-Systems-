@@ -46,6 +46,14 @@ OWNER_NUMBER = "+917378386125"      # <-- OWNER: fill in
 # If it is the same as OWNER_NUMBER, the owner's summary covers it.
 EXECUTIVE_NUMBER = "+917378386125"  # <-- OWNER: fill in
 
+# Key 4 forwards the caller live to this representative. If nobody answers
+# (or the network can't join the calls), the IVR falls back to a callback request.
+# Set FORWARD_CALLS = False to only take callback requests.
+FORWARD_CALLS = True
+REPRESENTATIVE_NUMBER = "+917822835756"
+FORWARD_RING_SECONDS = 30      # how long to ring the representative
+FORWARD_MAX_MINUTES = 60       # longest a forwarded call may stay joined through the SIM800L
+
 # After every call, send an SMS summary of the call and any booking
 SEND_CALLER_SUMMARY_SMS = True
 SEND_OWNER_SUMMARY_SMS = True
@@ -135,6 +143,7 @@ LANGUAGE_PROMPTS = [
     "prices_menu", "price_4k", "price_fhd", "price_installation",
     "storage_menu", "storage_options", "storage_days",
     "booking_menu", "booking_confirmed",
+    "exec_connecting", "exec_unavailable",
     "exec_request", "exec_no_caller_id",
     "invalid", "goodbye",
 ]
@@ -151,6 +160,7 @@ FINAL_RESULTS = ("OK", "ERROR", "+CME ERROR", "+CMS ERROR")
 CLIP_RE = re.compile(r'\+CLIP:\s*"([^"]*)"')
 DTMF_RE = re.compile(r'\+DTMF:\s*([0-9*#A-D])')
 CLCC_RE = re.compile(r'\+CLCC:\s*\d+,\d+,(\d+)')
+CLCC_FULL_RE = re.compile(r'\+CLCC:\s*(\d+),(\d+),(\d+)')  # id, direction (0 out / 1 in), status
 CLCC_NUMBER_RE = re.compile(r'\+CLCC:\s*\d+,\d+,\d+,\d+,\d+,"([^"]*)"')
 CREG_RE = re.compile(r'\+CREG:\s*\d+,(\d+)')
 
@@ -171,6 +181,7 @@ class Modem:
         self.ser = serial.Serial(port, baudrate=baud, timeout=0.1)
         self.buf = b""
         self.urc = deque()  # unsolicited lines seen while waiting for a command reply
+        self.noise = 0      # lines that had garbage bytes in them
         log.info("Established communication with %s", self.ser.name)
 
     def close(self):
@@ -185,7 +196,11 @@ class Modem:
         while True:
             if b"\n" in self.buf:
                 raw, self.buf = self.buf.split(b"\n", 1)
-                line = raw.decode("ascii", "ignore").strip()
+                text = raw.decode("ascii", "ignore")
+                # Drop line noise (stray bytes from a weak supply or loose wire)
+                line = "".join(c for c in text if c.isprintable()).strip()
+                if len(line) != len(text.strip()):
+                    self.noise += 1
                 if line:
                     return line
                 continue
@@ -194,6 +209,15 @@ class Modem:
             chunk = self.ser.read(self.ser.in_waiting or 1)
             if chunk:
                 self.buf += chunk
+
+    def drain(self, quiet=0.3):
+        """Discard leftover replies (e.g. a late OK), keeping unsolicited lines."""
+        while True:
+            line = self._readline(quiet)
+            if line is None:
+                return
+            if line.startswith(URC_PREFIXES):
+                self.urc.append(line)
 
     def next_event(self, timeout):
         """Next unsolicited line (RING, +CLIP, +DTMF, NO CARRIER...), or None."""
@@ -253,27 +277,43 @@ class Modem:
 
 def init_modem(modem):
     """Checks SIM800L status and configures it for incoming calls."""
+    # A few ATs let the SIM800L lock onto the baud rate after power-up
     for _ in range(10):
         if modem.command("AT")[0]:
             break
         time.sleep(1)
     else:
         raise serial.SerialException("SIM800 Module not responding")
+    time.sleep(0.5)
+    modem.drain()
 
+    # (command, required). Optional ones only fine-tune behaviour.
     setup = [
-        ("ATE0", 2),               # no command echo
-        ("ATS0=0", 2),             # never auto-answer, the Pi answers with ATA
-        ("AT+CLIP=1", 2),          # caller number on incoming calls
-        ("AT+CLCC=1", 2),          # call status reports (catches hang-ups)
-        ("AT+DDET=1", 2),          # DTMF key press detection
-        ("AT+CMGF=1", 2),          # SMS text mode
-        ("AT+CSMP=17,167,0,0", 2),
-        ("AT+CNMI=0,0,0,0,0", 2),  # don't push incoming SMS to the serial port
+        ("ATE0", True),                # no command echo
+        ("ATS0=0", True),              # never auto-answer, the Pi answers with ATA
+        ("AT+CLIP=1", True),           # caller number on incoming calls
+        ("AT+CLCC=1", False),          # call status reports (extra hang-up detection)
+        ("AT+DDET=1", True),           # DTMF key press detection
+        ("AT+CMGF=1", True),           # SMS text mode
+        ("AT+CSMP=17,167,0,0", False),
+        ("AT+CNMI=0,0,0,0,0", False),  # don't push incoming SMS to the serial port.
+                                       # Fails until the SIM's SMS service is ready; harmless.
     ]
-    for cmd, timeout in setup:
-        ok, final, _ = modem.command(cmd, timeout)
+    for cmd, required in setup:
+        for attempt in range(3):
+            ok, final, _ = modem.command(cmd, 3)
+            if ok:
+                break
+            time.sleep(1)
+            modem.drain()  # throw away a late reply so it isn't mistaken for the next one
         if not ok:
-            log.warning("%s -> %s", cmd, final)
+            if required:
+                log.warning("%s failed (%s). Calls may not work properly", cmd, final)
+            else:
+                log.info("%s not accepted (%s), continuing without it", cmd, final)
+    if modem.noise:
+        log.warning("Garbled bytes on the serial line. Check the SIM800L power supply "
+                    "(3.7-4.2 V, 2 A), a shared GND with the Pi, and the TX/RX wires")
 
     # Calls only reach the IVR if the SIM is unlocked and registered on the network
     ok, _, lines = modem.command("AT+CPIN?", 5)
@@ -352,6 +392,7 @@ class Call:
         self.executive_requested = False
         self.heard = []       # information prompts the caller listened to
         self.booking = None   # (booking id, camera type)
+        self.forwarded = None  # "transferred" / "conference" when put through to the representative
         self.started = time.monotonic()
 
     def _event(self, timeout):
@@ -363,8 +404,8 @@ class Call:
             return None
         if line.startswith(("NO CARRIER", "BUSY", "NO ANSWER")):
             raise CallEnded(line)
-        m = CLCC_RE.match(line)
-        if m and m.group(1) == "6":  # call status 6 = disconnected
+        m = CLCC_FULL_RE.match(line)
+        if m and m.group(2) == "1" and m.group(3) == "6":  # caller's call disconnected
             raise CallEnded(line)
         m = DTMF_RE.match(line)
         if m:
@@ -410,6 +451,97 @@ class Call:
         self.path.append(self.lang)
         log.info("Language: %s", LANGUAGE_NAMES[self.lang])
 
+    def forward_to_representative(self):
+        """Hold the caller, ring the representative and join them.
+
+        Returns "transferred" (network handed the call over, SIM800L is free),
+        "conference" (calls joined through the SIM800L until one side hangs up),
+        or None if the representative couldn't be reached (caller is back on the line).
+        Raises CallEnded if the caller hangs up while waiting.
+        """
+        m = self.modem
+        self.play("exec_connecting", interruptible=False)
+        log.info("Forwarding caller to representative %s", REPRESENTATIVE_NUMBER)
+        ok, final, _ = m.command("AT+CHLD=2", 10)  # put the caller on hold
+        if not ok:
+            log.warning("Could not hold the caller (%s); network may not support it", final)
+            return None
+
+        ok, final, _ = m.command("ATD%s;" % REPRESENTATIVE_NUMBER, 15,
+                                 finals=FINAL_RESULTS + ("NO CARRIER", "BUSY", "NO ANSWER",
+                                                         "NO DIALTONE"))
+        rep_id = None
+        answered = False
+        if ok:
+            deadline = time.monotonic() + FORWARD_RING_SECONDS
+            while time.monotonic() < deadline:
+                line = m.next_event(0.5)
+                if not line:
+                    continue
+                c = CLCC_FULL_RE.match(line)
+                if c:
+                    call_id, direction, status = c.groups()
+                    if direction == "1" and status == "6":
+                        self._drop_call(rep_id)
+                        raise CallEnded("caller hung up while on hold")
+                    if direction == "0":
+                        rep_id = call_id
+                        if status == "0":
+                            answered = True
+                            break
+                        if status == "6":
+                            break
+                elif line.startswith(("BUSY", "NO ANSWER", "NO CARRIER")):
+                    break
+        else:
+            log.info("Representative dial failed (%s)", final)
+
+        if answered:
+            log.info("Representative answered, joining the calls")
+            ok, final, _ = m.command("AT+CHLD=4", 10)  # explicit call transfer
+            if ok:
+                log.info("Call transferred to representative")
+                return "transferred"
+            ok, final, _ = m.command("AT+CHLD=3", 10)  # fall back to a 3-way conference
+            if ok:
+                log.info("Caller and representative joined in a conference")
+                self._wait_conference()
+                return "conference"
+            log.warning("Network could not join the calls (%s)", final)
+
+        log.info("Representative not reached, taking caller off hold")
+        self._drop_call(rep_id)
+        m.command("AT+CHLD=2", 10)  # retrieve the held caller
+        # Throw away the representative's leftover call reports, but notice if the caller left
+        end = time.monotonic() + 1.0
+        while time.monotonic() < end:
+            line = m.next_event(0.2)
+            c = CLCC_FULL_RE.match(line or "")
+            if c and c.group(2) == "1" and c.group(3) == "6":
+                raise CallEnded(line)
+        return None
+
+    def _drop_call(self, call_id):
+        if call_id:
+            self.modem.command("AT+CHLD=1%s" % call_id, 10)
+        else:
+            # Still dialling: AT+CHLD=1 ends the active/dialling call and keeps the held one
+            self.modem.command("AT+CHLD=1", 10)
+
+    def _wait_conference(self):
+        """Stay out of the way until the caller or the representative hangs up."""
+        self.player.stop()
+        deadline = time.monotonic() + FORWARD_MAX_MINUTES * 60
+        while time.monotonic() < deadline:
+            line = self.modem.next_event(1.0)
+            if not line:
+                continue
+            c = CLCC_FULL_RE.match(line)
+            if (c and c.group(3) == "6") or line.startswith("NO CARRIER"):
+                log.info("Conference ended (%s)", line)
+                return
+        log.info("Conference reached %d minutes, ending it", FORWARD_MAX_MINUTES)
+
     def run(self):
         """Returns when the call should be hung up."""
         self.choose_language()
@@ -443,6 +575,11 @@ class Call:
                 self.play("booking_confirmed", interruptible=False)
                 stack = ["main"]
             elif action == "executive":
+                if FORWARD_CALLS and is_set(REPRESENTATIVE_NUMBER):
+                    self.forwarded = self.forward_to_representative()
+                    if self.forwarded:
+                        return
+                    self.play("exec_unavailable", interruptible=False)
                 self.executive_requested = True
                 if self.caller:
                     self.play("exec_request", interruptible=False)
@@ -472,6 +609,8 @@ def send_summaries(modem, call, duration, outcome):
     heard = ", ".join(TOPIC_NAMES.get(t, t) for t in call.heard) or "menu only"
     booking = "%s %s site visit" % call.booking if call.booking else "none"
     callback = "YES" if call.executive_requested else "no"
+    if call.forwarded:
+        callback = "forwarded live to rep"
 
     if SEND_OWNER_SUMMARY_SMS and is_set(OWNER_NUMBER):
         modem.send_sms(OWNER_NUMBER,
@@ -492,7 +631,8 @@ def send_summaries(modem, call, duration, outcome):
                          % (call.booking[1], call.booking[0]))
         if call.executive_requested:
             parts.append("An executive will call you back soon.")
-        if not call.booking and not call.executive_requested and is_set(OWNER_NUMBER):
+        if (not call.booking and not call.executive_requested and not call.forwarded
+                and is_set(OWNER_NUMBER)):
             parts.append("For bookings or help call %s." % OWNER_NUMBER)
         modem.send_sms(call.caller, " ".join(parts))
 
@@ -535,6 +675,8 @@ def handle_call(modem, player, caller):
     outcome = "completed"
     try:
         call.run()
+        if call.forwarded:
+            outcome = "forwarded to representative"
     except CallEnded as e:
         outcome = "caller hung up"
         log.info("Call ended: %s", e)

@@ -71,6 +71,8 @@ TEXTS = {
                         "To repeat, press 9. To go back, press 0.",
         "booking_confirmed": "Your site visit is booked. You will receive an SMS with your booking reference, "
                              "and our team will call you to fix the date. Returning to the main menu.",
+        "exec_connecting": "Please hold while we connect you to our customer support representative.",
+        "exec_unavailable": "Sorry, our representative is not available right now.",
         "exec_request": "Thank you. Our support executive will call you back shortly on this number. Goodbye.",
         "exec_no_caller_id": "Your number is hidden, so we cannot call you back or confirm a booking. "
                              "Please call our executive directly on {executive_phone}. Goodbye.",
@@ -107,6 +109,8 @@ TEXTS = {
                         "दोबारा सुनने के लिए 9 दबाएं. पीछे जाने के लिए 0 दबाएं.",
         "booking_confirmed": "आपकी साइट विज़िट बुक हो गई है. आपको बुकिंग नंबर के साथ एक एस एम एस मिलेगा, "
                              "और हमारी टीम तारीख तय करने के लिए आपको कॉल करेगी. अब आप मुख्य मेनू में हैं.",
+        "exec_connecting": "कृपया लाइन पर बने रहें, हम आपको हमारे कस्टमर सपोर्ट प्रतिनिधि से जोड़ रहे हैं.",
+        "exec_unavailable": "माफ़ कीजिए, हमारे प्रतिनिधि अभी उपलब्ध नहीं हैं.",
         "exec_request": "धन्यवाद. हमारे सपोर्ट एग्ज़ीक्यूटिव जल्द ही आपको इसी नंबर पर कॉल करेंगे. नमस्ते.",
         "exec_no_caller_id": "आपका नंबर छिपा हुआ है, इसलिए हम आपको कॉल नहीं कर सकते या बुकिंग पक्की नहीं कर सकते. "
                              "कृपया हमारे एग्ज़ीक्यूटिव को सीधे {executive_phone} पर कॉल करें. नमस्ते.",
@@ -143,6 +147,8 @@ TEXTS = {
                         "पुन्हा ऐकण्यासाठी 9 दाबा. मागे जाण्यासाठी 0 दाबा.",
         "booking_confirmed": "तुमची साइट व्हिजिट बुक झाली आहे. तुम्हाला बुकिंग क्रमांकासह एक एस एम एस मिळेल, "
                              "आणि आमची टीम तारीख ठरवण्यासाठी तुम्हाला कॉल करेल. आता तुम्ही मुख्य मेनूमध्ये आहात.",
+        "exec_connecting": "कृपया लाईनवर थांबा, आम्ही तुम्हाला आमच्या कस्टमर सपोर्ट प्रतिनिधीशी जोडत आहोत.",
+        "exec_unavailable": "माफ करा, आमचे प्रतिनिधी सध्या उपलब्ध नाहीत.",
         "exec_request": "धन्यवाद. आमचे सपोर्ट एक्झिक्युटिव्ह लवकरच तुम्हाला याच नंबरवर कॉल करतील. नमस्कार.",
         "exec_no_caller_id": "तुमचा नंबर लपवलेला आहे, त्यामुळे आम्ही तुम्हाला कॉल करू शकत नाही किंवा बुकिंग निश्चित करू शकत नाही. "
                              "कृपया आमच्या एक्झिक्युटिव्हला थेट {executive_phone} वर कॉल करा. नमस्कार.",

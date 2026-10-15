@@ -19,20 +19,20 @@ import wave
 # FILL_IN - OWNER: replace every "X" with your real figure, then re-run
 # _____________________________________________________________________________
 FILL_IN = {
-    "warranty_years": "X",
-    "price_4k_camera": "X",     # rupees per 4K camera
-    "price_4k_kit": "X",        # rupees for a 4-camera 4K kit
-    "price_fhd_camera": "X",    # rupees per Full HD camera
-    "price_fhd_kit": "X",       # rupees for a 4-camera Full HD kit
-    "price_install": "X",       # rupees installation per camera
-    "price_wiring": "X",         # rupees wiring per metre
-    "price_500gb": "X",
-    "price_1tb": "X",
-    "price_2tb": "X",
-    "price_4tb": "X",
-    "days_4k_1tb": "X",         # days of recording on 1 TB with 4 cameras
-    "days_fhd_1tb": "X",
-    "executive_phone": "X",     # spoken digit by digit, e.g. "9 8 7 6 5 4 3 2 1 0"
+    "warranty_years": "1 Year",
+    "price_4k_camera": "5,000 Rs",     # rupees per 4K camera
+    "price_4k_kit": "10,000 Rs",        # rupees for a 4-camera 4K kit
+    "price_fhd_camera": "3,000 Rs",    # rupees per Full HD camera
+    "price_fhd_kit": "7,000 Rs",       # rupees for a 4-camera Full HD kit
+    "price_install": "1,000 Rs per camera",       # rupees installation per camera
+    "price_wiring": "50 Rs per feet",         # rupees wiring per metre
+    "price_500gb": "2,500 Rs",
+    "price_1tb": "5,000 Rs",
+    "price_2tb": "10,000 Rs",
+    "price_4tb": "20,000 Rs",
+    "days_4k_1tb": "1.5 Days",         # days of recording on 1 TB with 4 cameras
+    "days_fhd_1tb": "3 Days",
+    "executive_phone": "8484990460",     # spoken digit by digit, e.g. "9 8 7 6 5 4 3 2 1 0"
 }
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

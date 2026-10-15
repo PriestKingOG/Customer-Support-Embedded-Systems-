@@ -10,9 +10,12 @@ Flow for every incoming call (from any number):
   1. Answer, read the caller's number from +CLIP.
   2. Language menu: 1 English, 2 Hindi, 3 Marathi.
   3. Main menu: 1 Cameras, 2 Prices, 3 Storage, 4 Talk to an executive,
-                9 Repeat, 0 Change language.
+                5 Book a site visit, 9 Repeat, 0 Change language.
   4. "Talk to an executive" -> caller hears a confirmation, call ends, and the
      executive gets an SMS with the caller's number so they can call back.
+  5. "Book a site visit" -> caller picks 4K or FHD, gets a booking reference.
+  After every call, the caller and the owner get an SMS summary of the call
+  and any booking.
 
 Prompts are pre-recorded WAV files (8 kHz, mono, 16-bit) in audio/<lang>/.
 See README.md for the full list of files to record.
@@ -36,17 +39,23 @@ import serial  # for serial communication with GSM SIM800L
 SERIAL_PORT = "/dev/ttyUSB0"
 BAUD_RATE = 9600
 
-# Support executive's mobile number (receives an SMS for every callback request)
-EXECUTIVE_NUMBER = "+91XXXXXXXXXX"  # <-- OWNER: fill in
+# Business owner's mobile number (gets an SMS summary of every call and booking)
+OWNER_NUMBER = "+917378386125"      # <-- OWNER: fill in
 
-# Also send the caller an SMS confirming that an executive will call back
-SEND_CALLER_CONFIRMATION_SMS = True
+# Support executive's mobile number (gets an SMS for every callback request).
+# If it is the same as OWNER_NUMBER, the owner's summary covers it.
+EXECUTIVE_NUMBER = "+917378386125"  # <-- OWNER: fill in
+
+# After every call, send an SMS summary of the call and any booking
+SEND_CALLER_SUMMARY_SMS = True
+SEND_OWNER_SUMMARY_SMS = True
 
 BUSINESS_NAME = "TrueView"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 AUDIO_DIR = os.path.join(BASE_DIR, "audio")
 CALL_LOG = os.path.join(BASE_DIR, "call_log.csv")
+BOOKINGS_LOG = os.path.join(BASE_DIR, "bookings.csv")
 
 DIGIT_TIMEOUT = 8        # seconds to wait for a key press after a prompt ends
 MAX_ATTEMPTS = 3         # no-input / invalid-input retries before hanging up
@@ -60,6 +69,7 @@ LANGUAGE_NAMES = {"en": "English", "hi": "Hindi", "mr": "Marathi"}
 #   ("menu", name)   go to a sub-menu
 #   ("play", file)   play an information prompt, then repeat the current menu
 #   ("executive", _) callback request to the support executive
+#   ("book", what)   book a site visit / installation for that camera type
 #   ("back", _)      previous menu
 #   ("repeat", _)    play the current menu again
 #   ("language", _)  back to language selection
@@ -71,8 +81,18 @@ MENUS = {
             "2": ("menu", "prices"),
             "3": ("menu", "storage"),
             "4": ("executive", None),
+            "5": ("menu", "booking"),
             "9": ("repeat", None),
             "0": ("language", None),
+        },
+    },
+    "booking": {
+        "prompt": "booking_menu",
+        "options": {
+            "1": ("book", "4K camera"),
+            "2": ("book", "FHD 1080p camera"),
+            "9": ("repeat", None),
+            "0": ("back", None),
         },
     },
     "cameras": {
@@ -114,6 +134,7 @@ LANGUAGE_PROMPTS = [
     "cameras_menu", "camera_4k", "camera_fhd",
     "prices_menu", "price_4k", "price_fhd", "price_installation",
     "storage_menu", "storage_options", "storage_days",
+    "booking_menu", "booking_confirmed",
     "exec_request", "exec_no_caller_id",
     "invalid", "goodbye",
 ]
@@ -123,13 +144,15 @@ log = logging.getLogger("ivr")
 
 # Lines the modem sends on its own (not as a reply to a command)
 URC_PREFIXES = ("RING", "+CLIP", "+DTMF", "NO CARRIER", "BUSY", "NO ANSWER",
-                "+CLCC", "+CMTI", "Call Ready", "SMS Ready", "+CPIN", "UNDER-VOLTAGE",
+                "+CLCC", "+CMTI", "Call Ready", "SMS Ready", "UNDER-VOLTAGE",
                 "OVER-VOLTAGE")
 FINAL_RESULTS = ("OK", "ERROR", "+CME ERROR", "+CMS ERROR")
 
 CLIP_RE = re.compile(r'\+CLIP:\s*"([^"]*)"')
 DTMF_RE = re.compile(r'\+DTMF:\s*([0-9*#A-D])')
 CLCC_RE = re.compile(r'\+CLCC:\s*\d+,\d+,(\d+)')
+CLCC_NUMBER_RE = re.compile(r'\+CLCC:\s*\d+,\d+,\d+,\d+,\d+,"([^"]*)"')
+CREG_RE = re.compile(r'\+CREG:\s*\d+,(\d+)')
 
 
 class CallEnded(Exception):
@@ -238,21 +261,45 @@ def init_modem(modem):
         raise serial.SerialException("SIM800 Module not responding")
 
     setup = [
-        "ATE0",               # no command echo
-        "ATS0=0",             # never auto-answer, the Pi answers with ATA
-        "AT+CLIP=1",          # caller number on incoming calls
-        "AT+CLCC=1",          # call status reports (catches hang-ups)
-        "AT+DDET=1",          # DTMF key press detection
-        "AT+CMGF=1",          # SMS text mode
-        "AT+CSMP=17,167,0,0",
-        "AT+CNMI=0,0,0,0,0",  # don't push incoming SMS to the serial port
+        ("ATE0", 2),               # no command echo
+        ("ATS0=0", 2),             # never auto-answer, the Pi answers with ATA
+        ("AT+CLIP=1", 2),          # caller number on incoming calls
+        ("AT+CLCC=1", 2),          # call status reports (catches hang-ups)
+        ("AT+DDET=1", 2),          # DTMF key press detection
+        ("AT+CMGF=1", 2),          # SMS text mode
+        ("AT+CSMP=17,167,0,0", 2),
+        ("AT+CNMI=0,0,0,0,0", 2),  # don't push incoming SMS to the serial port
     ]
-    for cmd in setup:
-        ok, final, _ = modem.command(cmd)
+    for cmd, timeout in setup:
+        ok, final, _ = modem.command(cmd, timeout)
         if not ok:
             log.warning("%s -> %s", cmd, final)
+
+    # Calls only reach the IVR if the SIM is unlocked and registered on the network
+    ok, _, lines = modem.command("AT+CPIN?", 5)
+    if "READY" not in " ".join(lines):
+        raise serial.SerialException("SIM not ready (%s). Remove the SIM PIN using a phone"
+                                     % " ".join(lines))
+    deadline = time.monotonic() + 60
+    while not is_registered(modem):
+        if time.monotonic() > deadline:
+            raise serial.SerialException("SIM not registered on the network")
+        log.info("Waiting for network registration...")
+        time.sleep(3)
+
+    # Make sure the network doesn't divert or queue callers away from the IVR
+    for cmd in ("AT+CCFC=4,0",   # cancel any call forwarding on the SIM
+                "AT+CCWA=0,0"):  # no call waiting: a 2nd caller hears busy, not endless ringing
+        ok, final, _ = modem.command(cmd, 15)
+        if not ok:
+            log.warning("%s -> %s", cmd, final)
+    log.info("SIM800 Module -> Active and Ready, answering calls from any number")
+
+
+def is_registered(modem):
     ok, _, lines = modem.command("AT+CREG?")
-    log.info("SIM800 Module -> Active and Ready (network: %s)", " ".join(lines))
+    m = CREG_RE.search(" ".join(lines))
+    return bool(m) and m.group(1) in ("1", "5")  # 1 = home network, 5 = roaming
 
 
 # _____________________________________________________________________________
@@ -303,6 +350,8 @@ class Call:
         self.lang = None
         self.path = []
         self.executive_requested = False
+        self.heard = []       # information prompts the caller listened to
+        self.booking = None   # (booking id, camera type)
         self.started = time.monotonic()
 
     def _event(self, timeout):
@@ -373,6 +422,8 @@ class Call:
             if action == "menu":
                 stack.append(arg)
             elif action == "play":
+                if arg not in self.heard:
+                    self.heard.append(arg)
                 digit = self.play(arg)
                 if digit in menu["options"]:
                     # Caller pressed a key while info played: treat it as a menu choice
@@ -381,6 +432,15 @@ class Call:
                 stack.pop()
             elif action == "language":
                 self.choose_language()
+                stack = ["main"]
+            elif action == "book":
+                if not self.caller:
+                    self.play("exec_no_caller_id", interruptible=False)
+                    return
+                booking_id = "TV" + datetime.datetime.now().strftime("%y%m%d%H%M") + self.caller[-3:]
+                self.booking = (booking_id, arg)
+                log.info("Booking %s: %s site visit for %s", booking_id, arg, self.caller)
+                self.play("booking_confirmed", interruptible=False)
                 stack = ["main"]
             elif action == "executive":
                 self.executive_requested = True
@@ -392,16 +452,60 @@ class Call:
             # "repeat" just plays the menu again
 
 
-def notify_executive(modem, call):
+TOPIC_NAMES = {
+    "camera_4k": "4K camera", "camera_fhd": "FHD camera",
+    "price_4k": "4K price", "price_fhd": "FHD price",
+    "price_installation": "installation", "storage_options": "storage",
+    "storage_days": "recording days",
+}
+
+
+def is_set(number):
+    return bool(number) and "X" not in number
+
+
+def send_summaries(modem, call, duration, outcome):
+    """After every call: SMS to the caller, the owner and (on request) the executive."""
     now = datetime.datetime.now().strftime("%d-%b %H:%M")
     lang = LANGUAGE_NAMES.get(call.lang, "-")
-    modem.send_sms(EXECUTIVE_NUMBER,
-                   "%s IVR: callback request from %s (%s) at %s. Menu path: %s"
-                   % (BUSINESS_NAME, call.caller, lang, now, " > ".join(call.path[-4:])))
-    if SEND_CALLER_CONFIRMATION_SMS:
-        modem.send_sms(call.caller,
-                       "Thank you for calling %s CCTV. Our support executive will call "
-                       "you back shortly on this number." % BUSINESS_NAME)
+    caller = call.caller or "hidden number"
+    heard = ", ".join(TOPIC_NAMES.get(t, t) for t in call.heard) or "menu only"
+    booking = "%s %s site visit" % call.booking if call.booking else "none"
+    callback = "YES" if call.executive_requested else "no"
+
+    if SEND_OWNER_SUMMARY_SMS and is_set(OWNER_NUMBER):
+        modem.send_sms(OWNER_NUMBER,
+                       "%s IVR %s: %s (%s) %ds, %s. Booking: %s. Callback: %s. Heard: %s"
+                       % (BUSINESS_NAME, now, caller, lang, duration, outcome,
+                          booking, callback, heard))
+
+    if (call.executive_requested and call.caller and is_set(EXECUTIVE_NUMBER)
+            and EXECUTIVE_NUMBER != OWNER_NUMBER):
+        modem.send_sms(EXECUTIVE_NUMBER,
+                       "%s IVR: callback request from %s (%s) at %s. Booking: %s. Heard: %s"
+                       % (BUSINESS_NAME, call.caller, lang, now, booking, heard))
+
+    if SEND_CALLER_SUMMARY_SMS and call.caller:
+        parts = ["Thanks for calling %s CCTV." % BUSINESS_NAME]
+        if call.booking:
+            parts.append("Site visit booked for %s, ref %s. We will call to fix the date."
+                         % (call.booking[1], call.booking[0]))
+        if call.executive_requested:
+            parts.append("An executive will call you back soon.")
+        if not call.booking and not call.executive_requested and is_set(OWNER_NUMBER):
+            parts.append("For bookings or help call %s." % OWNER_NUMBER)
+        modem.send_sms(call.caller, " ".join(parts))
+
+
+def log_booking(call):
+    new = not os.path.isfile(BOOKINGS_LOG)
+    with open(BOOKINGS_LOG, "a", newline="") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(["time", "booking_id", "caller", "language", "camera"])
+        w.writerow([datetime.datetime.now().isoformat(timespec="seconds"),
+                    call.booking[0], call.caller, LANGUAGE_NAMES.get(call.lang, ""),
+                    call.booking[1]])
 
 
 def log_call(call, duration, outcome):
@@ -410,10 +514,11 @@ def log_call(call, duration, outcome):
         w = csv.writer(f)
         if new:
             w.writerow(["time", "caller", "language", "path", "executive_requested",
-                        "duration_s", "outcome"])
+                        "booking_id", "duration_s", "outcome"])
         w.writerow([datetime.datetime.now().isoformat(timespec="seconds"),
                     call.caller or "", LANGUAGE_NAMES.get(call.lang, ""),
                     " > ".join(call.path), call.executive_requested,
+                    call.booking[0] if call.booking else "",
                     int(duration), outcome])
 
 
@@ -445,13 +550,17 @@ def handle_call(modem, player, caller):
         duration = time.monotonic() - call.started
         log.info("_____________________IVR END (%s, %ds)___________________", outcome, duration)
 
-    if call.executive_requested and call.caller:
-        notify_executive(modem, call)
     try:
         log_call(call, duration, outcome)
+        if call.booking:
+            log_booking(call)
     except OSError as e:
         log.warning("Could not write call log: %s", e)
+    send_summaries(modem, call, int(duration), outcome)
+    # Drop leftovers from this call, but keep a new caller's RING
+    pending = [l for l in modem.urc if l == "RING" or l.startswith("+CLIP")]
     modem.urc.clear()
+    modem.urc.extend(pending)
 
 
 def serve(modem, player):
@@ -463,21 +572,25 @@ def serve(modem, player):
             if time.monotonic() - last_activity > IDLE_HEALTH_CHECK:
                 if not modem.command("AT")[0]:
                     raise serial.SerialException("SIM800 stopped responding")
+                if not is_registered(modem):
+                    raise serial.SerialException("SIM lost network registration")
                 last_activity = time.monotonic()
             continue
         last_activity = time.monotonic()
 
-        if line == "RING" or line.startswith("+CLIP"):
-            caller = None
-            m = CLIP_RE.match(line)
+        # Any incoming call is answered: no whitelist, hidden numbers included.
+        # RING, +CLIP or an incoming +CLCC (status 4) all mean someone is calling.
+        clcc = CLCC_RE.match(line)
+        incoming_clcc = bool(clcc) and clcc.group(1) == "4"
+        if line == "RING" or line.startswith("+CLIP") or incoming_clcc:
+            m = CLIP_RE.match(line) or CLCC_NUMBER_RE.match(line)
             # +CLIP normally arrives right after RING
             deadline = time.monotonic() + 3
             while m is None and time.monotonic() < deadline:
                 nxt = modem.next_event(0.5)
                 if nxt:
-                    m = CLIP_RE.match(nxt)
-            if m:
-                caller = m.group(1) or None
+                    m = CLIP_RE.match(nxt) or CLCC_NUMBER_RE.match(nxt)
+            caller = (m.group(1) or None) if m else None
             print("_____________________IVR START___________________")
             handle_call(modem, player, caller)
 

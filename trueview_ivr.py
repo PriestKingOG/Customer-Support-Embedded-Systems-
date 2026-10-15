@@ -40,11 +40,11 @@ SERIAL_PORT = "/dev/ttyUSB0"
 BAUD_RATE = 9600
 
 # Business owner's mobile number (gets an SMS summary of every call and booking)
-OWNER_NUMBER = "+917378386125"      # <-- OWNER: fill in
+OWNER_NUMBER = "+91XXXXXXXXXX"      # <-- OWNER: fill in
 
 # Support executive's mobile number (gets an SMS for every callback request).
 # If it is the same as OWNER_NUMBER, the owner's summary covers it.
-EXECUTIVE_NUMBER = "+917378386125"  # <-- OWNER: fill in
+EXECUTIVE_NUMBER = "+91XXXXXXXXXX"  # <-- OWNER: fill in
 
 # Key 4 forwards the caller live to this representative. If nobody answers
 # (or the network can't join the calls), the IVR falls back to a callback request.
@@ -57,6 +57,7 @@ FORWARD_MAX_MINUTES = 60       # longest a forwarded call may stay joined throug
 # After every call, send an SMS summary of the call and any booking
 SEND_CALLER_SUMMARY_SMS = True
 SEND_OWNER_SUMMARY_SMS = True
+SEND_REPRESENTATIVE_SUMMARY_SMS = True  # representative also gets the caller's number after every call
 
 BUSINESS_NAME = "TrueView"
 
@@ -601,8 +602,15 @@ def is_set(number):
     return bool(number) and "X" not in number
 
 
+def same_number(number, numbers):
+    """True if number matches any in numbers (compares the last 10 digits)."""
+    tail = re.sub(r"\D", "", number)[-10:]
+    return any(re.sub(r"\D", "", n)[-10:] == tail for n in numbers)
+
+
 def send_summaries(modem, call, duration, outcome):
-    """After every call: SMS to the caller, the owner and (on request) the executive."""
+    """After every call: SMS to the caller, the owner, the representative and
+    (on a callback request) the executive."""
     now = datetime.datetime.now().strftime("%d-%b %H:%M")
     lang = LANGUAGE_NAMES.get(call.lang, "-")
     caller = call.caller or "hidden number"
@@ -612,14 +620,23 @@ def send_summaries(modem, call, duration, outcome):
     if call.forwarded:
         callback = "forwarded live to rep"
 
+    # Owner and representative: caller's number first, so it is never cut off
+    summary = ("Caller: %s. %s IVR %s, %s, %ds, %s. Booking: %s. Callback: %s. Heard: %s"
+               % (caller, BUSINESS_NAME, now, lang, duration, outcome, booking, callback, heard))
+    staff = []
     if SEND_OWNER_SUMMARY_SMS and is_set(OWNER_NUMBER):
-        modem.send_sms(OWNER_NUMBER,
-                       "%s IVR %s: %s (%s) %ds, %s. Booking: %s. Callback: %s. Heard: %s"
-                       % (BUSINESS_NAME, now, caller, lang, duration, outcome,
-                          booking, callback, heard))
+        staff.append(OWNER_NUMBER)
+    if SEND_REPRESENTATIVE_SUMMARY_SMS and is_set(REPRESENTATIVE_NUMBER):
+        staff.append(REPRESENTATIVE_NUMBER)
+    sent_to = set()
+    for number in staff:
+        if same_number(number, sent_to):
+            continue
+        modem.send_sms(number, summary)
+        sent_to.add(number)
 
     if (call.executive_requested and call.caller and is_set(EXECUTIVE_NUMBER)
-            and EXECUTIVE_NUMBER != OWNER_NUMBER):
+            and not same_number(EXECUTIVE_NUMBER, sent_to)):
         modem.send_sms(EXECUTIVE_NUMBER,
                        "%s IVR: callback request from %s (%s) at %s. Booking: %s. Heard: %s"
                        % (BUSINESS_NAME, call.caller, lang, now, booking, heard))
